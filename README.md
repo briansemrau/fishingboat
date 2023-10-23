@@ -14,9 +14,10 @@ I have several local AI models and servers that I want to use on occasion, e.g.
 
 To use these models, I have to manually start and stop servers whenever I want to use them. I can't leave them running 24/7, because they consume significant resources on my machine. Sometimes I need those resources for compiling code (or playing video games). Dealing with this is _annoying_.
 
-I could solve this in two ways:
-1. Modify the software to dynamically load/unload models from memory depending on usage (I've implemented this in my own software, but I won't bother implementing this in others')
+I could solve this in a few ways:
+1. Modify the each program to dynamically load/unload models from memory depending on usage (I've implemented this before in my own software, but I won't bother duplicating the effort elsewhere)
 2. Create a reverse proxy to detect when each service is in use, and automatically start/stop containers according to usage.
+3. ~~spend $$$$ on lots of additional hardware~~
 
 FishingBoat is the manifestation of option #2.
 
