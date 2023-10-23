@@ -1,6 +1,6 @@
 # FishingBoat
 
-The name is a play on the nautical themes of Docker and Kubernetes, but aligned to the small scale of what this project does.
+The name is a play on the nautical themes of Docker and Kubernetes, but aligned to the small scale of what this project does. ChatGPT (where I outsource all my work, of course) was bad at name suggestions.
 
 _Warning: This is a work in progress, and it's a personal project. Don't expect stability outside of my own use case._
 
@@ -8,19 +8,32 @@ _Warning: This is a work in progress, and it's a personal project. Don't expect 
 
 This is a small program to solve a problem I encountered while experimenting with hosting several AI models on my desktop machine for my own entertainment.
 
-I have several local AI servers that I want to use on occasion, e.g.
+I have several local AI models and servers that I want to use on occasion, e.g.
 - [llama.cpp](https://github.com/ggerganov/llama.cpp), [TGI](https://huggingface.co/docs/text-generation-inference/index)
 - stable diffusion, [wuerstchen](https://huggingface.co/warp-ai/wuerstchen), soon [PixArt-alpha](https://huggingface.co/PixArt-alpha), etc.
 
-To use these models, I have to manually start and stop servers whenever I want to use them. I can't leave them running 24/7, because they consume significant resources on my machine. Sometimes I need those resources for compiling code (or playing video games).
+To use these models, I have to manually start and stop servers whenever I want to use them. I can't leave them running 24/7, because they consume significant resources on my machine. Sometimes I need those resources for compiling code (or playing video games). Dealing with this is _annoying_.
 
 I could solve this in two ways:
-1. Modify the software to dynamically load/unload models from memory depending on usage (I've done this before for chatbots, but it takes effort)
+1. Modify the software to dynamically load/unload models from memory depending on usage (I've implemented this in my own software, but I won't bother implementing this in others')
 2. Create a reverse proxy to detect when each service is in use, and automatically start/stop containers according to usage.
 
-**FishingBoat** is the manifestation of option #2.
+FishingBoat is the manifestation of option #2.
 
-_Note: I attempted to implement this using [minikube](https://minikube.sigs.k8s.io/docs/start/) and the [Keda HTTP Add-on](https://github.com/kedacore/http-add-on) to scale to zero depending on request load, but found it very annoying to set up on a local machine and inadequate for my goals._
+<details><summary>relevant xkcd</summary>
+
+![automation](https://imgs.xkcd.com/comics/automation.png)
+
+</details>
+<br>
+
+_Note: I attempted to implement this using [minikube](https://minikube.sigs.k8s.io/docs/start/) and the [Keda HTTP Add-on](https://github.com/kedacore/http-add-on) to scale to zero depending on request load, but found it very annoying to set up on a local machine and inadequate for my goals. (Requires host DNS configuration for http Host headers / doesn't support arbitrary TCP traffic, websockets / K8s is overkill anyway)_.
+
+## TODO
+
+- [ ] prevent starting containers when host resources are insufficient
+- [ ] cache incoming traffic before container finishes starting (`docker inspect`? healthchecks?)
+- [ ] actually try using this in practice instead of simple test cases
 
 ## How to use
 
@@ -28,7 +41,7 @@ This project uses Go.
 
 1. Configure your services in [services.json](example_services.json)
 
-2. `go launch proxy.go`
+2. `go launch fishingboat.go`
 
 ## Contributing
 
