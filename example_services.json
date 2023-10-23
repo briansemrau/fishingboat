@@ -1,0 +1,31 @@
+{
+    "proxyIP": "0.0.0.0",
+    "serviceHostIP": "0.0.0.0",
+    "resources": {
+        "allocationLimits": {
+            "cpu": 16000,
+            "memory": 32000,
+            "vmemory": 20000
+        }
+    },
+    "services": [
+        {
+            "name": "helloworld",
+            "image": "strm/helloworld-http:latest",
+            "pullPolicy": "ifnotpresent",
+            "cooldown": 60,
+            "priority": 1,
+            "resources": {
+                "cpu": 0,
+                "memory": 0,
+                "vmemory": 0
+            },
+            "ports": [
+                {
+                    "containerPort": 80,
+                    "hostPorts": [80]
+                }
+            ]
+        }
+    ]
+}
