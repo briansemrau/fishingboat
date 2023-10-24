@@ -3,9 +3,9 @@
     "serviceHostIP": "0.0.0.0",
     "resources": {
         "allocationLimits": {
-            "cpu": 16000,
-            "memory": 32000,
-            "vmemory": 20000
+            "mcpu": 4000,
+            "memoryMi": 8000,
+            "vmemoryMi": 4000
         }
     },
     "services": [

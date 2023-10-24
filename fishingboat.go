@@ -22,9 +22,9 @@ import (
 )
 
 type Resources struct {
-	CPU     int `json:"cpu"`
-	Memory  int `json:"memory"`
-	VMemory int `json:"vmemory"`
+	MilliCPU  int `json:"mcpu"`
+	MemoryMi  int `json:"memoryMi"`
+	VMemoryMi int `json:"vmemoryMi"`
 }
 
 type PortMapping struct {
@@ -32,10 +32,17 @@ type PortMapping struct {
 	HostPorts     []int `json:"hostPorts"`
 }
 
+const (
+	None         = ""
+	Always       = "always"
+	Never        = "never"
+	IfNotPresent = "ifnotpresent"
+)
+
 type Service struct {
 	Name            string        `json:"name"`
 	Image           string        `json:"image"`
-	PullPolicy      string        `json:"pullPolicy,omitempty"` // always, never, ifnotpresent // TODO enum
+	PullPolicy      string        `json:"pullPolicy,omitempty"`
 	Ports           []PortMapping `json:"ports"`
 	HostIP          string        `json:"hostIP,omitempty"`
 	Environment     []string      `json:"environment,omitempty"`
@@ -62,6 +69,9 @@ type Server struct {
 	ServiceProxyHostPortMap map[string]map[int]int
 	ServiceConnCount        map[string]uint
 	ServiceKillTime         map[string]time.Time
+
+	TrackedResourcesLock sync.RWMutex
+	TrackedResources     Resources
 
 	// prevent concurrent docker api calls per container
 	ContainerAPILock *MutexMap
@@ -232,6 +242,40 @@ func (s *Server) HandleConnection(src net.Conn, app Service, port PortMapping) {
 }
 
 func (s *Server) LaunchContainer(app Service) (err error) {
+	err = func() error {
+		s.TrackedResourcesLock.RLock()
+		defer s.TrackedResourcesLock.RUnlock()
+		if s.TrackedResources.MilliCPU+app.ResourceRequest.MilliCPU > s.Config.Resources.Limits.MilliCPU {
+			return fmt.Errorf("not enough cpu resources to launch container")
+		}
+		if s.TrackedResources.MemoryMi+app.ResourceRequest.MemoryMi > s.Config.Resources.Limits.MemoryMi {
+			return fmt.Errorf("not enough memory resources to launch container")
+		}
+		return nil
+	}()
+	if err != nil {
+		return
+	}
+
+	func() {
+		// reserve resources
+		s.TrackedResourcesLock.Lock()
+		defer s.TrackedResourcesLock.Unlock()
+		s.TrackedResources.MilliCPU += app.ResourceRequest.MilliCPU
+		s.TrackedResources.MemoryMi += app.ResourceRequest.MemoryMi
+		s.TrackedResources.VMemoryMi += app.ResourceRequest.VMemoryMi
+	}()
+	defer func() {
+		if err != nil {
+			// release unused resources
+			s.TrackedResourcesLock.Lock()
+			defer s.TrackedResourcesLock.Unlock()
+			s.TrackedResources.MilliCPU -= app.ResourceRequest.MilliCPU
+			s.TrackedResources.MemoryMi -= app.ResourceRequest.MemoryMi
+			s.TrackedResources.VMemoryMi -= app.ResourceRequest.VMemoryMi
+		}
+	}()
+
 	s.ContainerAPILock.Lock(app.Name)
 	defer s.ContainerAPILock.Unlock(app.Name)
 
@@ -280,12 +324,65 @@ searchlist:
 	}
 
 	var contID string
+
+	// TODO this control flow is messy. should be redesigned/refactored
+	defer func() {
+		if err != nil {
+			return
+		}
+		// Store port mappings (if not already stored)
+		needPortMappings := false
+		func() {
+			s.ServerLock.RLock()
+			defer s.ServerLock.RUnlock()
+			if _, ok := s.ServiceProxyHostPortMap[app.Name]; !ok {
+				needPortMappings = true
+			}
+		}()
+		if needPortMappings {
+			err = func() (err error) {
+				var inspect types.ContainerJSON
+				inspect, err = cli.ContainerInspect(context.Background(), contID)
+				if err != nil {
+					log.Println("Error inspecting container: ", err.Error())
+					return
+				}
+
+				s.ServerLock.Lock()
+				defer s.ServerLock.Unlock()
+
+				if _, ok := s.ServiceProxyHostPortMap[app.Name]; !ok {
+					s.ServiceProxyHostPortMap[app.Name] = make(map[int]int)
+				}
+				for natport, bindings := range inspect.HostConfig.PortBindings {
+					var containerPort int
+					containerPort, err = strconv.Atoi(strings.Split(string(natport), "/")[0])
+					if err != nil {
+						log.Println("Error parsing port: ", err.Error())
+						return
+					}
+					var backendHostPort int
+					backendHostPort, err = strconv.Atoi(bindings[0].HostPort)
+					if err != nil {
+						log.Println("Error parsing port: ", err.Error())
+						return
+					}
+					s.ServiceProxyHostPortMap[app.Name][containerPort] = backendHostPort
+				}
+				return
+			}()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	if cont == nil {
 		log.Println("Container does not exist")
 
 		// Pull the image
 		switch strings.ToLower(app.PullPolicy) {
-		case "always":
+		case Always:
 			log.Println("Pulling image with pull policy Always. This is not recommended. Consider using IfNotPresent.")
 			func() {
 				var resp io.ReadCloser
@@ -296,7 +393,7 @@ searchlist:
 				}
 				io.Copy(os.Stdout, resp)
 			}()
-		case "ifnotpresent":
+		case IfNotPresent:
 			// check if image exists
 			func() {
 				var images []types.ImageSummary
@@ -321,7 +418,7 @@ searchlist:
 				}
 				io.Copy(os.Stdout, resp)
 			}()
-		case "never": // do nothing
+		case Never, None: // do nothing
 		default:
 			log.Println("Unknown pull policy: ", app.PullPolicy)
 		}
@@ -370,6 +467,22 @@ searchlist:
 			portMap[containerPort] = portBindings
 		}
 
+		resources := container.Resources{}
+		if app.ResourceRequest.MemoryMi > 0 {
+			resources.Memory = int64(app.ResourceRequest.MemoryMi * 1024 * 1024)
+		}
+		if app.ResourceRequest.MilliCPU > 0 {
+			resources.NanoCPUs = int64(app.ResourceRequest.MilliCPU * 1000000)
+		}
+		if app.ResourceRequest.VMemoryMi > 0 {
+			resources.DeviceRequests = []container.DeviceRequest{
+				{
+					Driver: "nvidia",
+					Count:  -1,
+				},
+			}
+		}
+
 		var resp container.CreateResponse
 		resp, err = cli.ContainerCreate(
 			context.Background(),
@@ -377,8 +490,9 @@ searchlist:
 				Image: app.Image,
 			},
 			&container.HostConfig{
-				PortBindings: portMap,
 				NetworkMode:  container.NetworkMode("default"),
+				PortBindings: portMap,
+				Resources:    resources,
 			},
 			nil,
 			nil,
@@ -390,6 +504,7 @@ searchlist:
 		}
 		contID = resp.ID
 	} else {
+		contID = cont.ID
 		// Check if the container is already running
 		if cont.State == "running" {
 			log.Println("Container", cont.ID, "is already running")
@@ -397,59 +512,43 @@ searchlist:
 		} else {
 			log.Println("Container is not running (state:" + cont.State + ")")
 		}
-		contID = cont.ID
-	}
-
-	// Store port mappings (if not already stored)
-	needPortMappings := false
-	func() {
-		s.ServerLock.RLock()
-		defer s.ServerLock.RUnlock()
-		if _, ok := s.ServiceProxyHostPortMap[app.Name]; !ok {
-			needPortMappings = true
-		}
-	}()
-	if needPortMappings {
-		err = func() (err error) {
-			var inspect types.ContainerJSON
-			inspect, err = cli.ContainerInspect(context.Background(), contID)
-			if err != nil {
-				log.Println("Error inspecting container: ", err.Error())
-				return
-			}
-
-			s.ServerLock.Lock()
-			defer s.ServerLock.Unlock()
-
-			if _, ok := s.ServiceProxyHostPortMap[app.Name]; !ok {
-				s.ServiceProxyHostPortMap[app.Name] = make(map[int]int)
-			}
-			for natport, bindings := range inspect.HostConfig.PortBindings {
-				var containerPort int
-				containerPort, err = strconv.Atoi(strings.Split(string(natport), "/")[0])
-				if err != nil {
-					log.Println("Error parsing port: ", err.Error())
-					return
-				}
-				var backendHostPort int
-				backendHostPort, err = strconv.Atoi(bindings[0].HostPort)
-				if err != nil {
-					log.Println("Error parsing port: ", err.Error())
-					return
-				}
-				s.ServiceProxyHostPortMap[app.Name][containerPort] = backendHostPort
-			}
-			return
-		}()
-		if err != nil {
-			return
-		}
 	}
 
 	// Start the container
 	err = cli.ContainerStart(context.Background(), contID, types.ContainerStartOptions{})
 	if err != nil {
 		log.Println("Error starting container: ", err.Error())
+		return
+	}
+
+	// Wait for the container to start
+	err = func() error {
+		checkFreq := 100 * time.Millisecond
+		checkTimeout := 10 * time.Second
+		for i := 0; i < int(checkTimeout/checkFreq); i++ {
+			cont, err := cli.ContainerInspect(context.Background(), contID)
+			if err != nil {
+				log.Println("Error inspecting container: ", err.Error())
+				return err
+			}
+			health := types.NoHealthcheck
+			if cont.State.Health != nil {
+				health = cont.State.Health.Status
+			}
+			if health == types.NoHealthcheck {
+				if cont.State.Running {
+					log.Println("", app.Name, "container is reported running after", i*int(checkFreq/time.Millisecond), "ms")
+					return nil
+				}
+			} else if health == types.Healthy {
+				log.Println("", app.Name, "container is reported healthy after", i*int(checkFreq/time.Millisecond), "ms")
+				return nil
+			}
+			time.Sleep(checkFreq)
+		}
+		return fmt.Errorf("container did not start in time")
+	}()
+	if err != nil {
 		return
 	}
 
@@ -511,12 +610,6 @@ searchlist:
 		return
 	}
 
-	// Check if the container is already stopped
-	// if cont.State != "running" {
-	// 	log.Println("Container is already stopped")
-	// 	return
-	// }
-
 	// Stop command
 	err = cli.ContainerStop(context.Background(), cont.ID, container.StopOptions{})
 	if err != nil {
@@ -537,6 +630,35 @@ searchlist:
 
 	log.Println("Stopped container", cont.ID, "for application", name)
 
+	func() {
+		var service *Service
+		for _, serv := range s.Config.Services {
+			if serv.Name == name {
+				service = &serv
+				break
+			}
+		}
+		if service == nil {
+			log.Println("Could not find service config for", name)
+			return
+		}
+		s.TrackedResourcesLock.Lock()
+		defer s.TrackedResourcesLock.Unlock()
+		s.TrackedResources.MilliCPU -= service.ResourceRequest.MilliCPU
+		s.TrackedResources.MemoryMi -= service.ResourceRequest.MemoryMi
+		s.TrackedResources.VMemoryMi -= service.ResourceRequest.VMemoryMi
+	}()
+
+	return
+}
+
+func (s *Server) ComposeUp() (err error) {
+	// TODO support docker compose
+	return
+}
+
+func (s *Server) ComposeDown() (err error) {
+	// TODO support docker compose
 	return
 }
 
@@ -555,8 +677,10 @@ func main() {
 		ServerLock:              sync.RWMutex{},
 		ServiceConnCount:        make(map[string]uint),
 		ServiceKillTime:         make(map[string]time.Time),
-		ContainerAPILock:        NewMutexMap(),
 		ServiceProxyHostPortMap: make(map[string]map[int]int),
+		TrackedResourcesLock:    sync.RWMutex{},
+		TrackedResources:        Resources{},
+		ContainerAPILock:        NewMutexMap(),
 	}
 	err = server.Start()
 	if err != nil {

@@ -38,7 +38,7 @@ func (mm *MutexMap) Unlock(key interface{}) {
 	defer mm.mutex.Unlock()
 	e, ok := mm.mutexmap[key]
 	if !ok {
-		panic(fmt.Errorf("unlocking entry not found in mutexmap for key ", key))
+		panic(fmt.Errorf("unlocking entry not found in mutexmap for key %v", key))
 	}
 	e.count--
 	if e.count <= 0 {

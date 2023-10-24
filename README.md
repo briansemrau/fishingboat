@@ -30,19 +30,13 @@ FishingBoat is the manifestation of option #2.
 
 _Note: I attempted to implement this using [minikube](https://minikube.sigs.k8s.io/docs/start/) and the [Keda HTTP Add-on](https://github.com/kedacore/http-add-on) to scale to zero depending on request load, but found it very annoying to set up on a local machine and inadequate for my goals. (Requires host DNS configuration for http Host headers / doesn't support arbitrary TCP traffic, websockets / K8s is overkill anyway)_.
 
-## TODO
-
-- [ ] prevent starting containers when host resources are insufficient
-- [ ] cache incoming traffic before container finishes starting (`docker inspect`? healthchecks?)
-- [ ] actually try using this in practice instead of simple test cases
-
 ## How to use
 
 This project uses Go.
 
 1. Configure your services in [services.json](example_services.json)
 
-2. `go launch fishingboat.go`
+2. `go run fishingboat.go`
 
 ## Contributing
 
