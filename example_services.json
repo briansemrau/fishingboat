@@ -5,7 +5,7 @@
         "allocationLimits": {
             "mcpu": 4000,
             "memoryMi": 8000,
-            "vmemoryMi": 4000
+            "gpuMemoryMi": 8000
         }
     },
     "services": [
@@ -16,14 +16,56 @@
             "cooldown": 60,
             "priority": 1,
             "resources": {
-                "cpu": 0,
-                "memory": 0,
-                "vmemory": 0
+                "mcpu": 0,
+                "memoryMi": 8,
+                "gpuMemoryMi": 0
             },
             "ports": [
                 {
                     "containerPort": 80,
                     "hostPorts": [80]
+                }
+            ]
+        },
+        {
+            "name": "llama.cpp",
+            "image": "ghcr.io/ggerganov/llama.cpp:full-cuda",
+            "pullPolicy": "IfNotPresent",
+            "cmd": ["--server", "-m", "/mnt/d/models/llm/zephyr-7b-alpha.Q5_K_M.gguf", "-ngl", "99", "-c", "4096", "--port", "8080", "--host", "0.0.0.0"],
+            "config": {
+                "ExposedPorts": {
+                    "8080/tcp": {}
+                },
+                "Healthcheck": {
+                    "Test": [
+                        "CMD", "timeout", "1", "bash", "-c", "cat /dev/null > /dev/tcp/0.0.0.0/8080"
+                    ],
+                    "Interval": 1000000000,
+                    "Timeout": 60000000000,
+                    "StartPeriod": 90000000000,
+                    "Retries": 10
+                }
+            },
+            "hostConfig": {
+                "Mounts": [
+                    {
+                        "Type": "bind",
+                        "Source": "D:\\",
+                        "Target": "/mnt/d",
+                        "ReadOnly": true
+                    }
+                ]
+            },
+            "cooldown": 300,
+            "resources": {
+                "mcpu": 0,
+                "memoryMi": 4000,
+                "gpuMemoryMi": 8000
+            },
+            "ports": [
+                {
+                    "containerPort": 8080,
+                    "hostPorts": [8080]
                 }
             ]
         }

@@ -22,9 +22,9 @@ import (
 )
 
 type Resources struct {
-	MilliCPU  int `json:"mcpu"`
-	MemoryMi  int `json:"memoryMi"`
-	VMemoryMi int `json:"vmemoryMi"`
+	MilliCPU    int `json:"mcpu"`
+	MemoryMi    int `json:"memoryMi"`
+	GpuMemoryMi int `json:"gpuMemoryMi"`
 }
 
 type PortMapping struct {
@@ -41,13 +41,17 @@ const (
 
 type Service struct {
 	Name            string        `json:"name"`
-	Image           string        `json:"image"`
-	PullPolicy      string        `json:"pullPolicy,omitempty"`
-	Ports           []PortMapping `json:"ports"`
-	HostIP          string        `json:"hostIP,omitempty"`
-	Environment     []string      `json:"environment,omitempty"`
+	ResourceRequest *Resources    `json:"resources,omitempty"`
 	CoolDown        int           `json:"cooldown"`
-	ResourceRequest Resources     `json:"resources"`
+	Ports           []PortMapping `json:"ports"`
+
+	Image      string `json:"image"`
+	PullPolicy string `json:"pullPolicy,omitempty"`
+	HostIP     string `json:"hostIP,omitempty"`
+
+	Cmd        []string              `json:"cmd,omitempty"`
+	Config     *container.Config     `json:"config,omitempty"`
+	HostConfig *container.HostConfig `json:"hostConfig,omitempty"`
 }
 
 type ServerResourceLimits struct {
@@ -242,40 +246,6 @@ func (s *Server) HandleConnection(src net.Conn, app Service, port PortMapping) {
 }
 
 func (s *Server) LaunchContainer(app Service) (err error) {
-	err = func() error {
-		s.TrackedResourcesLock.RLock()
-		defer s.TrackedResourcesLock.RUnlock()
-		if s.TrackedResources.MilliCPU+app.ResourceRequest.MilliCPU > s.Config.Resources.Limits.MilliCPU {
-			return fmt.Errorf("not enough cpu resources to launch container")
-		}
-		if s.TrackedResources.MemoryMi+app.ResourceRequest.MemoryMi > s.Config.Resources.Limits.MemoryMi {
-			return fmt.Errorf("not enough memory resources to launch container")
-		}
-		return nil
-	}()
-	if err != nil {
-		return
-	}
-
-	func() {
-		// reserve resources
-		s.TrackedResourcesLock.Lock()
-		defer s.TrackedResourcesLock.Unlock()
-		s.TrackedResources.MilliCPU += app.ResourceRequest.MilliCPU
-		s.TrackedResources.MemoryMi += app.ResourceRequest.MemoryMi
-		s.TrackedResources.VMemoryMi += app.ResourceRequest.VMemoryMi
-	}()
-	defer func() {
-		if err != nil {
-			// release unused resources
-			s.TrackedResourcesLock.Lock()
-			defer s.TrackedResourcesLock.Unlock()
-			s.TrackedResources.MilliCPU -= app.ResourceRequest.MilliCPU
-			s.TrackedResources.MemoryMi -= app.ResourceRequest.MemoryMi
-			s.TrackedResources.VMemoryMi -= app.ResourceRequest.VMemoryMi
-		}
-	}()
-
 	s.ContainerAPILock.Lock(app.Name)
 	defer s.ContainerAPILock.Unlock(app.Name)
 
@@ -474,26 +444,46 @@ searchlist:
 		if app.ResourceRequest.MilliCPU > 0 {
 			resources.NanoCPUs = int64(app.ResourceRequest.MilliCPU * 1000000)
 		}
-		if app.ResourceRequest.VMemoryMi > 0 {
+		if app.ResourceRequest.GpuMemoryMi > 0 {
 			resources.DeviceRequests = []container.DeviceRequest{
 				{
-					Driver: "nvidia",
+					Driver: "",
 					Count:  -1,
+					Capabilities: [][]string{
+						{"gpu"},
+					},
 				},
 			}
 		}
+		oomKillDisable := true
+		resources.OomKillDisable = &oomKillDisable
+
+		var config container.Config
+		if app.Config != nil {
+			configCopy := *app.Config
+			config = configCopy
+		} else {
+			config = container.Config{}
+		}
+		config.Image = app.Image
+		config.Cmd = app.Cmd
+
+		var hostConfig container.HostConfig
+		if app.HostConfig != nil {
+			hostConfigCopy := *app.HostConfig
+			hostConfig = hostConfigCopy
+		} else {
+			hostConfig = container.HostConfig{}
+		}
+		hostConfig.NetworkMode = container.NetworkMode("default")
+		hostConfig.PortBindings = portMap
+		hostConfig.Resources = resources
 
 		var resp container.CreateResponse
 		resp, err = cli.ContainerCreate(
 			context.Background(),
-			&container.Config{
-				Image: app.Image,
-			},
-			&container.HostConfig{
-				NetworkMode:  container.NetworkMode("default"),
-				PortBindings: portMap,
-				Resources:    resources,
-			},
+			&config,
+			&hostConfig,
 			nil,
 			nil,
 			containerName,
@@ -514,6 +504,43 @@ searchlist:
 		}
 	}
 
+	err = func() error {
+		s.TrackedResourcesLock.RLock()
+		defer s.TrackedResourcesLock.RUnlock()
+		if s.TrackedResources.MilliCPU+app.ResourceRequest.MilliCPU > s.Config.Resources.Limits.MilliCPU {
+			return fmt.Errorf("not enough cpu resources to launch container")
+		}
+		if s.TrackedResources.MemoryMi+app.ResourceRequest.MemoryMi > s.Config.Resources.Limits.MemoryMi {
+			return fmt.Errorf("not enough memory resources to launch container")
+		}
+		if s.TrackedResources.GpuMemoryMi+app.ResourceRequest.GpuMemoryMi > s.Config.Resources.Limits.GpuMemoryMi {
+			return fmt.Errorf("not enough video memory resources to launch container")
+		}
+		return nil
+	}()
+	if err != nil {
+		return
+	}
+
+	func() {
+		// reserve resources
+		s.TrackedResourcesLock.Lock()
+		defer s.TrackedResourcesLock.Unlock()
+		s.TrackedResources.MilliCPU += app.ResourceRequest.MilliCPU
+		s.TrackedResources.MemoryMi += app.ResourceRequest.MemoryMi
+		s.TrackedResources.GpuMemoryMi += app.ResourceRequest.GpuMemoryMi
+	}()
+	defer func() {
+		if err != nil {
+			// release unused resources
+			s.TrackedResourcesLock.Lock()
+			defer s.TrackedResourcesLock.Unlock()
+			s.TrackedResources.MilliCPU -= app.ResourceRequest.MilliCPU
+			s.TrackedResources.MemoryMi -= app.ResourceRequest.MemoryMi
+			s.TrackedResources.GpuMemoryMi -= app.ResourceRequest.GpuMemoryMi
+		}
+	}()
+
 	// Start the container
 	err = cli.ContainerStart(context.Background(), contID, types.ContainerStartOptions{})
 	if err != nil {
@@ -530,6 +557,9 @@ searchlist:
 			if err != nil {
 				log.Println("Error inspecting container: ", err.Error())
 				return err
+			}
+			if cont.State.Status != "running" {
+				return fmt.Errorf("container is not running")
 			}
 			health := types.NoHealthcheck
 			if cont.State.Health != nil {
@@ -646,7 +676,7 @@ searchlist:
 		defer s.TrackedResourcesLock.Unlock()
 		s.TrackedResources.MilliCPU -= service.ResourceRequest.MilliCPU
 		s.TrackedResources.MemoryMi -= service.ResourceRequest.MemoryMi
-		s.TrackedResources.VMemoryMi -= service.ResourceRequest.VMemoryMi
+		s.TrackedResources.GpuMemoryMi -= service.ResourceRequest.GpuMemoryMi
 	}()
 
 	return
@@ -659,6 +689,16 @@ func (s *Server) ComposeUp() (err error) {
 
 func (s *Server) ComposeDown() (err error) {
 	// TODO support docker compose
+	return
+}
+
+func (s *Server) ProcessStart() (err error) {
+	// TODO support executable
+	return
+}
+
+func (s *Server) ProcessTerminate() (err error) {
+	// TODO support executables
 	return
 }
 
